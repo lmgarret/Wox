@@ -89,7 +89,7 @@ func waylandCopy(mimeType string, payload []byte) error {
 	if err != nil {
 		return errors.New("clipboard: wl-copy is not available")
 	}
-	return runWaylandClipboardCommandErr(bin, []string{"--type", mimeType}, payload)
+	return runWaylandClipboardWrite(bin, []string{"--type", mimeType}, payload)
 }
 
 func waylandPasteText() (string, error) {
@@ -177,7 +177,21 @@ func runWaylandClipboardCommand(bin string, args []string, stdin []byte) ([]byte
 	return output, nil
 }
 
-func runWaylandClipboardCommandErr(bin string, args []string, stdin []byte) error {
-	_, err := runWaylandClipboardCommand(bin, args, stdin)
-	return err
+// runWaylandClipboardWrite writes without capturing output. wl-copy forks a
+// process that keeps owning the selection until it is replaced and inherits any
+// stdout pipe, so capturing output blocks well past the handover.
+func runWaylandClipboardWrite(bin string, args []string, stdin []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), waylandClipboardCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("clipboard: Wayland clipboard command timed out: %s", bin)
+		}
+		return err
+	}
+	return nil
 }
