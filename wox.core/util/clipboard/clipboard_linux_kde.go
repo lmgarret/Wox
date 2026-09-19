@@ -3,15 +3,25 @@
 package clipboard
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"wox/util"
 )
 
-// kdeWaylandClipboard uses the desktop portal on KDE/Plasma Wayland, except
-// for images: KWin does not reliably request image payloads from a background
-// portal session, so image writes go through the focused UI GTK path.
+// kdeWaylandClipboard prefers ext-data-control-v1 on KDE/Plasma Wayland, which
+// needs no permission. The portal is only a fallback: it reads the clipboard
+// through a RemoteDesktop session, whose consent prompt KDE builds solely from
+// requested device types and screen sharing, so a clipboard-only session renders
+// an empty body. Images still go through the focused UI GTK path because KWin
+// does not reliably request image payloads from a background portal session.
 type kdeWaylandClipboard struct{}
+
+// portalFallbackNeeded keeps an empty clipboard, which is a valid answer rather
+// than a protocol failure, from escalating to the portal consent prompt.
+func portalFallbackNeeded(err error) bool {
+	return err != nil && !errors.Is(err, noDataErr)
+}
 
 func newKDEWaylandClipboard() kdeWaylandClipboard {
 	return kdeWaylandClipboard{}
@@ -22,45 +32,68 @@ func (kdeWaylandClipboard) name() string {
 }
 
 func (kdeWaylandClipboard) readContentType() Type {
+	if contentType := dataControlReadContentType(); contentType != "" {
+		return contentType
+	}
 	if err := portalReady(); err == nil {
 		return portalReadContentType()
 	}
-	return dataControlReadContentType()
+	return ""
 }
 
 func (kdeWaylandClipboard) readText() (string, error) {
-	if err := portalReady(); err == nil {
+	text, err := dataControlReadText()
+	if !portalFallbackNeeded(err) {
+		return text, err
+	}
+	if portalErr := portalReady(); portalErr == nil {
 		return portalReadText()
 	}
-	return dataControlReadText()
+	return text, err
 }
 
 func (kdeWaylandClipboard) readFilePaths() ([]string, error) {
-	if err := portalReady(); err == nil {
+	paths, err := dataControlReadFilePaths()
+	if !portalFallbackNeeded(err) {
+		return paths, err
+	}
+	if portalErr := portalReady(); portalErr == nil {
 		return portalReadFilePaths()
 	}
-	return dataControlReadFilePaths()
+	return paths, err
 }
 
 func (kdeWaylandClipboard) readImageSnapshot() (*ImageSnapshot, error) {
-	if err := portalReady(); err == nil {
+	img, err := dataControlReadImageSnapshot()
+	if !portalFallbackNeeded(err) {
+		return img, err
+	}
+	if portalErr := portalReady(); portalErr == nil {
 		return portalReadImageSnapshot()
 	}
-	return dataControlReadImageSnapshot()
+	return img, err
 }
 
 func (kdeWaylandClipboard) writeText(text string) error {
-	if err := portalReady(); err == nil {
+	err := waylandCopy(portalMimeTextUTF8, []byte(text))
+	if err == nil {
+		return nil
+	}
+	if portalErr := portalReady(); portalErr == nil {
 		return portalWriteText(text)
 	}
-	return waylandCopy(portalMimeTextUTF8, []byte(text))
+	return err
 }
 
 func (kdeWaylandClipboard) writeFilePaths(paths []string) error {
-	if err := portalReady(); err == nil {
+	err := newWaylandClipboard().writeFilePaths(paths)
+	if err == nil {
+		return nil
+	}
+	if portalErr := portalReady(); portalErr == nil {
 		return portalWriteFilePaths(paths)
 	}
-	return newWaylandClipboard().writeFilePaths(paths)
+	return err
 }
 
 func (kdeWaylandClipboard) writeImageBytes(pngData []byte) error {
@@ -71,17 +104,13 @@ func (kdeWaylandClipboard) writeImageBytes(pngData []byte) error {
 	return nil
 }
 
+// isChanged runs on the watcher's timer, so it must not reach portalReady and
+// raise the consent prompt with no user action to explain it.
 func (kdeWaylandClipboard) isChanged() bool {
-	if err := portalReady(); err == nil {
-		return portalIsChanged()
-	}
 	return dataControlIsChanged()
 }
 
 func (kdeWaylandClipboard) watchSnapshot() string {
-	if err := portalReady(); err == nil {
-		return portalWatchSnapshot()
-	}
 	return dataControlWatchSnapshot()
 }
 
